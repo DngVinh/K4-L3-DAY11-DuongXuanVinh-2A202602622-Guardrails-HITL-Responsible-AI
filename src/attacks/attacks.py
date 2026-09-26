@@ -104,11 +104,12 @@ def _is_transient_provider_error(exc: Exception) -> bool:
     status = getattr(exc, "status_code", None)
     if status is None:
         status = getattr(exc, "code", None)
-    try:
-        if int(status) in _TRANSIENT_PROVIDER_STATUS_CODES:
-            return True
-    except (TypeError, ValueError):
-        pass
+    if status is not None:
+        try:
+            if int(status) in _TRANSIENT_PROVIDER_STATUS_CODES:
+                return True
+        except (TypeError, ValueError):
+            pass
 
     if any(marker in message for marker in _TRANSIENT_PROVIDER_MARKERS):
         return True
@@ -125,7 +126,7 @@ async def _chat_with_retry(
     *,
     max_attempts: int = 5,
     base_delay_seconds: float = 2.0,
-):
+) -> tuple[str, object | None, int]:
     """Call the provider with bounded exponential backoff for transient errors."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
@@ -145,6 +146,8 @@ async def _chat_with_retry(
                 f"retry {attempt + 1}/{max_attempts} in {delay:.1f}s."
             )
             await asyncio.sleep(delay)
+
+    raise RuntimeError("Retry loop ended without returning or raising")
 
 
 def classify_attack_outcome(
