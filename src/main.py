@@ -19,6 +19,12 @@ import asyncio
 import sys
 from pathlib import Path
 
+# Keep Vietnamese status messages printable on Windows consoles and CI captures.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # Cho phép chạy ``python src/main.py`` từ gốc repo
 _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
@@ -92,7 +98,16 @@ async def part4_attacks():
     from attacks.attacks import run_attacks, save_attack_results
 
     red_default, red_default_runner = create_red_agent_default()
-    await test_agent(red_default, red_default_runner)
+    try:
+        await test_agent(red_default, red_default_runner)
+    except Exception as exc:
+        # This smoke call is informative only. A transient provider failure here
+        # must not prevent the graded attack runner from producing its artifacts;
+        # run_attacks records any per-prompt provider errors in the result files.
+        print(
+            "Red quick test could not complete; continuing with graded attacks "
+            f"({type(exc).__name__}: {exc})"
+        )
 
     print("\n--- Attacks on Red ---")
     unsafe_results = await run_attacks(

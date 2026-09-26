@@ -11,6 +11,7 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 from google.genai import types
@@ -21,6 +22,44 @@ from core.config import ALLOWED_TOPICS, BLOCKED_TOPICS
 
 # Quyết định rõ ràng — tránh đảo nghĩa True/False
 InputStatus = Literal["ALLOW", "BLOCK"]
+
+_INVISIBLE_CHARACTERS = dict.fromkeys(
+    map(ord, "\u200b\u200c\u200d\ufeff\u2060"), None
+)
+
+
+def _normalize_for_matching(text: str) -> str:
+    """Return a stable, accent-insensitive representation for policy checks."""
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    normalized = normalized.translate(_INVISIBLE_CHARACTERS)
+    normalized = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", normalized)
+        if not unicodedata.combining(char)
+    )
+    return re.sub(r"\s+", " ", normalized).strip().casefold()
+
+
+INJECTION_PATTERNS = (
+    r"\bignore\s+(?:all\s+)?(?:previous|prior|above|earlier)?\s*instructions?\b",
+    r"\b(?:disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|above|system|developer)?\s*(?:instructions?|rules?|guardrails?|safety)\b",
+    r"\byou\s+are\s+now\b",
+    r"\b(?:system|developer)\s+(?:prompt|message|instructions?)\b",
+    r"\b(?:reveal|show|display|print|repeat|quote|expose|leak)\b.{0,80}\b(?:instructions?|prompt|secrets?|credentials?|password|api\s*key)\b",
+    r"\bpretend\s+(?:that\s+)?you\s+are\b",
+    r"\bact\s+as\s+(?:an?\s+)?(?:unrestricted|unfiltered|uncensored)\b",
+    r"\bbo\s+qua\s+(?:tat\s+ca\s+|moi\s+)?(?:cac\s+)?huong\s+dan\b",
+    r"\b(?:tiet\s+lo|hien\s+thi|cho\s+(?:toi|minh)\s+xem)\b.{0,80}\b(?:mat\s+khau|khoa\s+api|thong\s+tin\s+noi\s+bo|system\s+prompt)\b",
+)
+
+
+def _contains_topic(text: str, topic: str) -> bool:
+    """Match a configured topic as a word/phrase, not as a substring."""
+    normalized_topic = _normalize_for_matching(topic)
+    if not normalized_topic:
+        return False
+    pattern = r"(?<!\w)" + re.escape(normalized_topic).replace(r"\ ", r"\s+") + r"(?!\w)"
+    return re.search(pattern, text) is not None
 
 
 # ============================================================
@@ -51,14 +90,9 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
-    INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
-    ]
-
+    normalized_input = _normalize_for_matching(user_input)
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, normalized_input, re.IGNORECASE):
             return "BLOCK"
     return "ALLOW"
 
@@ -84,14 +118,15 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"BLOCK"`` = chặn (off-topic hoặc topic cấm).
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
-    input_lower = user_input.lower()
+    normalized_input = _normalize_for_matching(user_input)
+    if not normalized_input:
+        return "BLOCK"
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
-
-    pass  # Replace with your implementation
+    if any(_contains_topic(normalized_input, topic) for topic in BLOCKED_TOPICS):
+        return "BLOCK"
+    if any(_contains_topic(normalized_input, topic) for topic in ALLOWED_TOPICS):
+        return "ALLOW"
+    return "BLOCK"
 
 
 # ============================================================
@@ -132,7 +167,7 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
     async def on_user_message_callback(
         self,
         *,
-        invocation_context: InvocationContext,
+        invocation_context: InvocationContext | None,
         user_message: types.Content,
     ) -> types.Content | None:
         """Check user message before sending to the agent.
@@ -144,14 +179,21 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I cannot process that request. "
+                "I'm here to help with banking questions only."
+            )
 
-        pass  # Replace with your implementation
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I'm a VinBank assistant and can only help with "
+                "banking-related questions."
+            )
+
+        return None
 
 
 # ============================================================
@@ -206,8 +248,10 @@ async def test_input_plugin():
         )
         status = "BLOCK" if result else "ALLOW"
         print(f"  [{status}] '{msg[:60]}'")
-        if result and result.parts:
-            print(f"           -> {result.parts[0].text[:80]}")
+        parts = result.parts if result else None
+        if parts:
+            response_text = parts[0].text or ""
+            print(f"           -> {response_text[:80]}")
     print(f"\nStats: {plugin.blocked_count} blocked / {plugin.total_count} total")
 
 
